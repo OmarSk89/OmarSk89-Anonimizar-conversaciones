@@ -1,0 +1,8 @@
+.DS_Store
+__pycache__/
+venv/
+log.log
+virtualenv
+.deployed
+.vscode
+.env
