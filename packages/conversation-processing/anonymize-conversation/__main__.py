@@ -37,11 +37,8 @@ class DigitalOceanBatchProcessor:
         )
 
         self.auth_url = os.getenv("ENDPOINT_AUTH_URL")
-        self.user = os.getenv("ENDPOINT_AUTH_USER")
-        self.password = os.getenv("ENDPOINT_AUTH_PASSWORD")
-        self.key = os.getenv("ENDPOINT_AUTH_KEY")
-        self.data_url = os.getenv("ENDPOINT_URL_TRANSCRIPTION")
-
+        self.data_url = os.getenv("ENDPOINT_URL_TRANSCRIPTION")    
+        self.skill_config = json.loads(os.getenv("SKILL_CONFIG_JSON"))  
         self._validate_config()
 
         self.s3_client = boto3_client(
@@ -70,10 +67,8 @@ class DigitalOceanBatchProcessor:
             "DO_SPACES_BUCKET",
             "DO_AGENTAI_API_KEY",
             "ENDPOINT_AUTH_URL",
-            "ENDPOINT_AUTH_USER",
-            "ENDPOINT_AUTH_PASSWORD",
-            "ENDPOINT_AUTH_KEY",
             "ENDPOINT_URL_TRANSCRIPTION",
+            "SKILL_CONFIG_JSON",
         ]
 
         missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -243,15 +238,15 @@ class DigitalOceanBatchProcessor:
             logger.error(f"Error when calling DigitalOcean GenAI: {str(e)}")
             return None
 
-    def get_token(self):
+    def get_token(self,user: str, password: str, key: str) -> Optional[str]:
         """Obtener el Bearer Token"""
         try:
             response = requests.post(
                 self.auth_url,
                 json={
-                    "user": self.user,
-                    "password": self.password,
-                    "key": self.key,
+                    "user": user,
+                    "password": password,
+                    "key": key,
                     "access": "IbangMiddlewareApi",
                 },
                 verify=False,
@@ -268,12 +263,22 @@ class DigitalOceanBatchProcessor:
             logger.error(f"Connection error when obtaining token: {str(e)}")
             return False
 
-    def send_to_endpoint(self, processed_data: Dict[str, Any]) -> bool:
+    def send_to_endpoint(self, processed_data: Dict[str, Any],endpoint_config: Dict[str, Any]) -> bool:
         """
         Enviar datos procesados al endpoint de Holamigo con autenticación.
         - `processed_data`: Estructura generada por `process_conversation_data`.
         """
-        token = self.get_token()
+
+        user = endpoint_config.get("auth_user")
+        password = endpoint_config.get("auth_pass")
+        key = endpoint_config.get("auth_key")
+
+        if not all([user, password, key]):
+            logger.error(f"Incomplete endpoint config for skill. Missing keys.")
+            return False
+        
+        token = self.get_token(user, password, key)
+
         if not token:
             logger.error("The token could not be obtained. Canceling sending.")
             return False
@@ -393,8 +398,26 @@ class DigitalOceanBatchProcessor:
             if not processed_data:
                 logger.error(f"Error procesando los datos del archivo {file_key}")
                 return False
+                       
+            skill = processed_data.get("Skill")
+            endpoint_config = None
 
-            if self.send_to_endpoint(processed_data):
+            if skill and skill in self.skill_config:
+                endpoint_config = self.skill_config[skill]
+                logger.info(f"Routing file {file_key} using skill '{skill}'")
+            elif "__default__" in self.skill_config:
+                endpoint_config = self.skill_config["__default__"]
+                logger.warning(
+                    f"Skill '{skill}' not found for {file_key}. Using __default__ endpoint."
+                )
+            else:
+                logger.error(
+                    f"Skill '{skill}' not found and no __default__ endpoint configured. Cannot route {file_key}."
+                )
+                self.move_to_failed(file_key)
+                return False
+
+            if self.send_to_endpoint(processed_data,endpoint_config):
                 if self.delete_file(file_key):
                     logger.info(f"Successfully processed and deleted {file_key}")
                     return True
